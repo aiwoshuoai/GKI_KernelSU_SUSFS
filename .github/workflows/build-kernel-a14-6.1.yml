@@ -264,6 +264,9 @@ jobs:
           # Run perl command to modify UTS_VERSION
           perl -pi -e 's{UTS_VERSION="\$\(echo \$UTS_VERSION \$CONFIG_FLAGS \$TIMESTAMP \| cut -b -\$UTS_LEN\)"}{UTS_VERSION="$(date -u +"%Y-%m-%d %H:%M:%S")"}' ./common/scripts/mkcompile_h
 
+          # Set custom kernel display name
+          echo "CONFIG_LOCALVERSION=\"-飞雪\"" >> ./common/arch/arm64/configs/gki_defconfig
+
       - name: Build the Kernel
         run: |
           echo "Changing to configuration directory: $CONFIG..."
