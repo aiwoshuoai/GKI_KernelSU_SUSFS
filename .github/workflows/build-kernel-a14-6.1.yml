@@ -24,22 +24,6 @@ jobs:
         include:
           - android_version: "android14"
             kernel_version: "6.1"
-            sub_level: "25"
-            os_patch_level: "2023-10"
-          - android_version: "android14"
-            kernel_version: "6.1"
-            sub_level: "43"
-            os_patch_level: "2023-11"
-          - android_version: "android14"
-            kernel_version: "6.1"
-            sub_level: "57"
-            os_patch_level: "2024-01"
-          - android_version: "android14"
-            kernel_version: "6.1"
-            sub_level: "68"
-            os_patch_level: "2024-03"
-          - android_version: "android14"
-            kernel_version: "6.1"
             sub_level: "75"
             os_patch_level: "2024-05"
           - android_version: "android14"
@@ -278,7 +262,7 @@ jobs:
           sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
 
           # Run perl command to modify UTS_VERSION
-          perl -pi -e 's{UTS_VERSION="\$\(echo \$UTS_VERSION \$CONFIG_FLAGS \$TIMESTAMP \| cut -b -\$UTS_LEN\)"}{UTS_VERSION="#1 SMP PREEMPT Sat Apr 20 04:20:00 UTC 2024"}' ./common/scripts/mkcompile_h
+          perl -pi -e 's{UTS_VERSION="\$\(echo \$UTS_VERSION \$CONFIG_FLAGS \$TIMESTAMP \| cut -b -\$UTS_LEN\)"}{UTS_VERSION="$(date -u +"%Y-%m-%d %H:%M:%S")"}' ./common/scripts/mkcompile_h
 
       - name: Build the Kernel
         run: |
@@ -327,27 +311,15 @@ jobs:
 
       - name: Create ZIP Files for Different Formats
         run: |
-          echo "Creating zip files for all formats..."
+          echo "Creating zip files for AK3 format..."
           cd ./AnyKernel3
           
-          # Create and upload zip for each format
+          # Create and upload zip for AK3 format
           ZIP_NAME="${{ matrix.kernel_version }}.${{ matrix.sub_level }}-${{ matrix.android_version }}-${{ matrix.os_patch_level }}-AnyKernel3.zip"
           echo "Creating zip file: $ZIP_NAME..."
           mv ../Image ./Image
           zip -r "../$ZIP_NAME" ./*
           rm ./Image
-          
-          ZIP_NAME="${{ matrix.kernel_version }}.${{ matrix.sub_level }}-${{ matrix.android_version }}-${{ matrix.os_patch_level }}-AnyKernel3-lz4.zip"
-          echo "Creating zip file: $ZIP_NAME..."
-          mv ../Image.lz4 ./Image.lz4
-          zip -r "../$ZIP_NAME" ./*
-          rm ./Image.lz4
-
-          ZIP_NAME="${{ matrix.kernel_version }}.${{ matrix.sub_level }}-${{ matrix.android_version }}-${{ matrix.os_patch_level }}-AnyKernel3-gz.zip"
-          echo "Creating zip file: $ZIP_NAME..."
-          mv ../Image.gz ./Image.gz
-          zip -r "../$ZIP_NAME" ./*
-          rm ./Image.gz
           
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
@@ -355,7 +327,6 @@ jobs:
           name: kernel-${{ env.CONFIG }}
           path: |
             *.zip
-            *.img
 
       - name: Clear GitHub Workspace
         if: ${{ inputs.runner == 'ubuntu-22.04-local' }}
