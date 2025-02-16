@@ -301,14 +301,14 @@ jobs:
         run: |
           echo "Changing to configuration directory: $CONFIG..."
           cd "$CONFIG"
-
+          
           if [ ! -d "./out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist" ]; then
             echo "Error: Directory ./out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist does not exist!"
             exit 1
           fi
-
+          
           mkdir bootimgs
-
+          
           echo "Creating bootimgs folder and copying images..."
           if [ ! -f "./out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image" ]; then
             echo "Error: Image file not found!"
@@ -318,7 +318,7 @@ jobs:
           cp ./out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image.lz4 ./bootimgs
           cp ./out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image ./
           cp ./out/${{ inputs.android_version }}-${{ inputs.kernel_version }}/dist/Image.lz4 ./
-
+          
           # Create gzip of the Image file
           gzip -n -k -f -9 ./Image > ./Image.gz
 

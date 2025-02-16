@@ -293,7 +293,6 @@ jobs:
               gh release upload ${{ env.NEW_TAG }} "$file"
           done
 
-      # Display Files Uploaded
       - name: Display Files Uploaded
         run: |
           echo "GitHub release created with the following files:"
