@@ -126,16 +126,6 @@ jobs:
           git clone https://github.com/WildPlusKernel/kernel_patches.git
           git clone https://github.com/firelzrd/bore-scheduler.git
 
-      - name: Set CONFIG Environment Variable
-        run: |
-          # Set CONFIG dynamically based on inputs values
-          CONFIG="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.sub_level }}"
-
-          # Set CONFIG as an environment variable for future steps
-          echo "CONFIG=$CONFIG" >> $GITHUB_ENV
-
-          echo "CONFIG set to: $CONFIG"
-
       - name: Initialize and Sync Kernel Source
         run: |
           echo "Creating folder for configuration: $CONFIG..."
@@ -286,6 +276,11 @@ jobs:
         run: |
           echo "Changing to configuration directory: $CONFIG..."
           cd "$CONFIG"
+
+          if [ ! -f "build/build.sh" ] && [ ! -f "tools/bazel" ]; then
+            echo "Error: Build script or Bazel not found!"
+            exit 1
+          fi
 
           sed -i '$s|echo "\$res"|echo "\$res-Wild+"|' ./common/scripts/setlocalversion
 
