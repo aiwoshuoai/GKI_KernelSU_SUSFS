@@ -1,0 +1,1065 @@
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu.h b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
+index dcb5de01a220..5be582f1a2d1 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
+@@ -781,7 +781,6 @@ struct amdgpu_device {
+ 	bool				need_swiotlb;
+ 	bool				accel_working;
+ 	struct notifier_block		acpi_nb;
+-	struct notifier_block		pm_nb;
+ 	struct amdgpu_i2c_chan		*i2c_bus[AMDGPU_MAX_I2C_BUS];
+ 	struct debugfs_blob_wrapper     debugfs_vbios_blob;
+ 	struct debugfs_blob_wrapper     debugfs_discovery_blob;
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+index 535cc74c5880..25032ed2d9e3 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+@@ -140,10 +140,6 @@ const char *amdgpu_asic_name[] = {
+ 	"LAST",
+ };
+ 
+-static inline void amdgpu_device_stop_pending_resets(struct amdgpu_device *adev);
+-static int amdgpu_device_pm_notifier(struct notifier_block *nb, unsigned long mode,
+-				     void *data);
+-
+ /**
+  * DOC: pcie_replay_count
+  *
+@@ -4000,11 +3996,6 @@ int amdgpu_device_init(struct amdgpu_device *adev,
+ 
+ 	amdgpu_device_check_iommu_direct_map(adev);
+ 
+-	adev->pm_nb.notifier_call = amdgpu_device_pm_notifier;
+-	r = register_pm_notifier(&adev->pm_nb);
+-	if (r)
+-		goto failed;
+-
+ 	return 0;
+ 
+ release_ras_con:
+@@ -4066,8 +4057,6 @@ void amdgpu_device_fini_hw(struct amdgpu_device *adev)
+ 	flush_delayed_work(&adev->delayed_init_work);
+ 	adev->shutdown = true;
+ 
+-	unregister_pm_notifier(&adev->pm_nb);
+-
+ 	/* make sure IB test finished before entering exclusive mode
+ 	 * to avoid preemption on IB test
+ 	 * */
+@@ -4202,33 +4191,6 @@ static int amdgpu_device_evict_resources(struct amdgpu_device *adev)
+ /*
+  * Suspend & resume.
+  */
+-/**
+- * amdgpu_device_pm_notifier - Notification block for Suspend/Hibernate events
+- * @nb: notifier block
+- * @mode: suspend mode
+- * @data: data
+- *
+- * This function is called when the system is about to suspend or hibernate.
+- * It is used to set the appropriate flags so that eviction can be optimized
+- * in the pm prepare callback.
+- */
+-static int amdgpu_device_pm_notifier(struct notifier_block *nb, unsigned long mode,
+-				     void *data)
+-{
+-	struct amdgpu_device *adev = container_of(nb, struct amdgpu_device, pm_nb);
+-
+-	switch (mode) {
+-	case PM_HIBERNATION_PREPARE:
+-		adev->in_s4 = true;
+-		break;
+-	case PM_POST_HIBERNATION:
+-		adev->in_s4 = false;
+-		break;
+-	}
+-
+-	return NOTIFY_DONE;
+-}
+-
+ /**
+  * amdgpu_device_prepare - prepare for device suspend
+  *
+@@ -4679,8 +4641,6 @@ static int amdgpu_device_reset_sriov(struct amdgpu_device *adev,
+ retry:
+ 	amdgpu_amdkfd_pre_reset(adev);
+ 
+-	amdgpu_device_stop_pending_resets(adev);
+-
+ 	if (from_hypervisor)
+ 		r = amdgpu_virt_request_full_gpu(adev, true);
+ 	else
+@@ -5552,12 +5512,11 @@ int amdgpu_device_gpu_recover(struct amdgpu_device *adev,
+ 			tmp_adev->asic_reset_res = r;
+ 		}
+ 
+-		if (!amdgpu_sriov_vf(tmp_adev))
+-			/*
+-			* Drop all pending non scheduler resets. Scheduler resets
+-			* were already dropped during drm_sched_stop
+-			*/
+-			amdgpu_device_stop_pending_resets(tmp_adev);
++		/*
++		 * Drop all pending non scheduler resets. Scheduler resets
++		 * were already dropped during drm_sched_stop
++		 */
++		amdgpu_device_stop_pending_resets(tmp_adev);
+ 	}
+ 
+ 	tmp_vram_lost_counter = atomic_read(&((adev)->vram_lost_counter));
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c
+index 4dcc7de961d0..ab06cb4d7b35 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c
+@@ -42,29 +42,6 @@
+ #include <linux/pci-p2pdma.h>
+ #include <linux/pm_runtime.h>
+ 
+-static const struct dma_buf_attach_ops amdgpu_dma_buf_attach_ops;
+-
+-/**
+- * dma_buf_attach_adev - Helper to get adev of an attachment
+- *
+- * @attach: attachment
+- *
+- * Returns:
+- * A struct amdgpu_device * if the attaching device is an amdgpu device or
+- * partition, NULL otherwise.
+- */
+-static struct amdgpu_device *dma_buf_attach_adev(struct dma_buf_attachment *attach)
+-{
+-	if (attach->importer_ops == &amdgpu_dma_buf_attach_ops) {
+-		struct drm_gem_object *obj = attach->importer_priv;
+-		struct amdgpu_bo *bo = gem_to_amdgpu_bo(obj);
+-
+-		return amdgpu_ttm_adev(bo->tbo.bdev);
+-	}
+-
+-	return NULL;
+-}
+-
+ /**
+  * amdgpu_dma_buf_attach - &dma_buf_ops.attach implementation
+  *
+@@ -76,14 +53,12 @@ static struct amdgpu_device *dma_buf_attach_adev(struct dma_buf_attachment *atta
+ static int amdgpu_dma_buf_attach(struct dma_buf *dmabuf,
+ 				 struct dma_buf_attachment *attach)
+ {
+-	struct amdgpu_device *attach_adev = dma_buf_attach_adev(attach);
+ 	struct drm_gem_object *obj = dmabuf->priv;
+ 	struct amdgpu_bo *bo = gem_to_amdgpu_bo(obj);
+ 	struct amdgpu_device *adev = amdgpu_ttm_adev(bo->tbo.bdev);
+ 	int r;
+ 
+-	if (!amdgpu_dmabuf_is_xgmi_accessible(attach_adev, bo) &&
+-	    pci_p2pdma_distance(adev->pdev, attach->dev, false) < 0)
++	if (pci_p2pdma_distance(adev->pdev, attach->dev, false) < 0)
+ 		attach->peer2peer = false;
+ 
+ 	r = pm_runtime_get_sync(adev_to_drm(adev)->dev);
+@@ -504,9 +479,6 @@ bool amdgpu_dmabuf_is_xgmi_accessible(struct amdgpu_device *adev,
+ 	struct drm_gem_object *obj = &bo->tbo.base;
+ 	struct drm_gem_object *gobj;
+ 
+-	if (!adev)
+-		return false;
+-
+ 	if (obj->import_attach) {
+ 		struct dma_buf *dma_buf = obj->import_attach->dmabuf;
+ 
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+index 055e05b2cb22..432e2866472d 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+@@ -2470,6 +2470,7 @@ static int amdgpu_pmops_freeze(struct device *dev)
+ 	struct amdgpu_device *adev = drm_to_adev(drm_dev);
+ 	int r;
+ 
++	adev->in_s4 = true;
+ 	r = amdgpu_device_suspend(drm_dev, true);
+ 	if (r)
+ 		return r;
+@@ -2482,8 +2483,13 @@ static int amdgpu_pmops_freeze(struct device *dev)
+ static int amdgpu_pmops_thaw(struct device *dev)
+ {
+ 	struct drm_device *drm_dev = dev_get_drvdata(dev);
++	struct amdgpu_device *adev = drm_to_adev(drm_dev);
++	int r;
+ 
+-	return amdgpu_device_resume(drm_dev, true);
++	r = amdgpu_device_resume(drm_dev, true);
++	adev->in_s4 = false;
++
++	return r;
+ }
+ 
+ static int amdgpu_pmops_poweroff(struct device *dev)
+@@ -2496,6 +2502,9 @@ static int amdgpu_pmops_poweroff(struct device *dev)
+ static int amdgpu_pmops_restore(struct device *dev)
+ {
+ 	struct drm_device *drm_dev = dev_get_drvdata(dev);
++	struct amdgpu_device *adev = drm_to_adev(drm_dev);
++
++	adev->in_s4 = false;
+ 
+ 	return amdgpu_device_resume(drm_dev, true);
+ }
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_psp.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_psp.c
+index c85c5c159554..ebff2235e0a9 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_psp.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_psp.c
+@@ -43,7 +43,7 @@
+ #include "amdgpu_securedisplay.h"
+ #include "amdgpu_atomfirmware.h"
+ 
+-#define AMD_VBIOS_FILE_MAX_SIZE_B      (1024*1024*16)
++#define AMD_VBIOS_FILE_MAX_SIZE_B      (1024*1024*3)
+ 
+ static int psp_sysfs_init(struct amdgpu_device *adev);
+ static void psp_sysfs_fini(struct amdgpu_device *adev);
+@@ -484,6 +484,7 @@ static int psp_sw_fini(void *handle)
+ {
+ 	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+ 	struct psp_context *psp = &adev->psp;
++	struct psp_gfx_cmd_resp *cmd = psp->cmd;
+ 
+ 	psp_memory_training_fini(psp);
+ 	if (psp->sos_fw) {
+@@ -510,8 +511,8 @@ static int psp_sw_fini(void *handle)
+ 	    adev->ip_versions[MP0_HWIP][0] == IP_VERSION(11, 0, 7))
+ 		psp_sysfs_fini(adev);
+ 
+-	kfree(psp->cmd);
+-	psp->cmd = NULL;
++	kfree(cmd);
++	cmd = NULL;
+ 
+ 	psp_free_shared_bufs(psp);
+ 
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c
+index d300f7710ebb..9fca0ac7bb71 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.c
+@@ -32,7 +32,6 @@
+ 
+ #include "amdgpu.h"
+ #include "amdgpu_ras.h"
+-#include "amdgpu_reset.h"
+ #include "vi.h"
+ #include "soc15.h"
+ #include "nv.h"
+@@ -457,7 +456,7 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
+ 		return -EINVAL;
+ 
+ 	if (pf2vf_info->size > 1024) {
+-		dev_err(adev->dev, "invalid pf2vf message size: 0x%x\n", pf2vf_info->size);
++		DRM_ERROR("invalid pf2vf message size\n");
+ 		return -EINVAL;
+ 	}
+ 
+@@ -468,9 +467,7 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
+ 			adev->virt.fw_reserve.p_pf2vf, pf2vf_info->size,
+ 			adev->virt.fw_reserve.checksum_key, checksum);
+ 		if (checksum != checkval) {
+-			dev_err(adev->dev,
+-				"invalid pf2vf message: header checksum=0x%x calculated checksum=0x%x\n",
+-				checksum, checkval);
++			DRM_ERROR("invalid pf2vf message\n");
+ 			return -EINVAL;
+ 		}
+ 
+@@ -484,9 +481,7 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
+ 			adev->virt.fw_reserve.p_pf2vf, pf2vf_info->size,
+ 			0, checksum);
+ 		if (checksum != checkval) {
+-			dev_err(adev->dev,
+-				"invalid pf2vf message: header checksum=0x%x calculated checksum=0x%x\n",
+-				checksum, checkval);
++			DRM_ERROR("invalid pf2vf message\n");
+ 			return -EINVAL;
+ 		}
+ 
+@@ -522,7 +517,7 @@ static int amdgpu_virt_read_pf2vf_data(struct amdgpu_device *adev)
+ 			((struct amd_sriov_msg_pf2vf_info *)pf2vf_info)->uuid;
+ 		break;
+ 	default:
+-		dev_err(adev->dev, "invalid pf2vf version: 0x%x\n", pf2vf_info->version);
++		DRM_ERROR("invalid pf2vf version\n");
+ 		return -EINVAL;
+ 	}
+ 
+@@ -622,21 +617,8 @@ static void amdgpu_virt_update_vf2pf_work_item(struct work_struct *work)
+ 	int ret;
+ 
+ 	ret = amdgpu_virt_read_pf2vf_data(adev);
+-	if (ret) {
+-		adev->virt.vf2pf_update_retry_cnt++;
+-		if ((adev->virt.vf2pf_update_retry_cnt >= AMDGPU_VF2PF_UPDATE_MAX_RETRY_LIMIT) &&
+-		    amdgpu_sriov_runtime(adev) && !amdgpu_in_reset(adev)) {
+-			if (amdgpu_reset_domain_schedule(adev->reset_domain,
+-							  &adev->virt.flr_work))
+-				return;
+-			else
+-				dev_err(adev->dev, "Failed to queue work! at %s", __func__);
+-		}
+-
++	if (ret)
+ 		goto out;
+-	}
+-
+-	adev->virt.vf2pf_update_retry_cnt = 0;
+ 	amdgpu_virt_write_vf2pf_data(adev);
+ 
+ out:
+@@ -657,7 +639,6 @@ void amdgpu_virt_init_data_exchange(struct amdgpu_device *adev)
+ 	adev->virt.fw_reserve.p_pf2vf = NULL;
+ 	adev->virt.fw_reserve.p_vf2pf = NULL;
+ 	adev->virt.vf2pf_update_interval_ms = 0;
+-	adev->virt.vf2pf_update_retry_cnt = 0;
+ 
+ 	if (adev->mman.fw_vram_usage_va != NULL) {
+ 		/* go through this logic in ip_init and reset to init workqueue*/
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h
+index 9267e792c4cf..bc451b56855c 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_virt.h
+@@ -51,8 +51,6 @@
+ /* tonga/fiji use this offset */
+ #define mmBIF_IOV_FUNC_IDENTIFIER 0x1503
+ 
+-#define AMDGPU_VF2PF_UPDATE_MAX_RETRY_LIMIT 30
+-
+ enum amdgpu_sriov_vf_mode {
+ 	SRIOV_VF_MODE_BARE_METAL = 0,
+ 	SRIOV_VF_MODE_ONE_VF,
+@@ -252,7 +250,6 @@ struct amdgpu_virt {
+ 	/* vf2pf message */
+ 	struct delayed_work vf2pf_work;
+ 	uint32_t vf2pf_update_interval_ms;
+-	int vf2pf_update_retry_cnt;
+ 
+ 	/* multimedia bandwidth config */
+ 	bool     is_mm_bw_enabled;
+diff --git a/drivers/gpu/drm/amd/amdgpu/gfxhub_v1_0.c b/drivers/gpu/drm/amd/amdgpu/gfxhub_v1_0.c
+index de74686cb1db..ec4d5e15b766 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gfxhub_v1_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gfxhub_v1_0.c
+@@ -92,12 +92,12 @@ static void gfxhub_v1_0_init_system_aperture_regs(struct amdgpu_device *adev)
+ {
+ 	uint64_t value;
+ 
+-	if (!amdgpu_sriov_vf(adev) || adev->asic_type <= CHIP_VEGA10) {
+-		/* Program the AGP BAR */
+-		WREG32_SOC15_RLC(GC, 0, mmMC_VM_AGP_BASE, 0);
+-		WREG32_SOC15_RLC(GC, 0, mmMC_VM_AGP_BOT, adev->gmc.agp_start >> 24);
+-		WREG32_SOC15_RLC(GC, 0, mmMC_VM_AGP_TOP, adev->gmc.agp_end >> 24);
++	/* Program the AGP BAR */
++	WREG32_SOC15_RLC(GC, 0, mmMC_VM_AGP_BASE, 0);
++	WREG32_SOC15_RLC(GC, 0, mmMC_VM_AGP_BOT, adev->gmc.agp_start >> 24);
++	WREG32_SOC15_RLC(GC, 0, mmMC_VM_AGP_TOP, adev->gmc.agp_end >> 24);
+ 
++	if (!amdgpu_sriov_vf(adev) || adev->asic_type <= CHIP_VEGA10) {
+ 		/* Program the system aperture low logical page number. */
+ 		WREG32_SOC15_RLC(GC, 0, mmMC_VM_SYSTEM_APERTURE_LOW_ADDR,
+ 			min(adev->gmc.fb_start, adev->gmc.agp_start) >> 18);
+diff --git a/drivers/gpu/drm/amd/amdgpu/hdp_v5_2.c b/drivers/gpu/drm/amd/amdgpu/hdp_v5_2.c
+index 6b9f2e1d9d69..f52552c5fa27 100644
+--- a/drivers/gpu/drm/amd/amdgpu/hdp_v5_2.c
++++ b/drivers/gpu/drm/amd/amdgpu/hdp_v5_2.c
+@@ -34,17 +34,7 @@ static void hdp_v5_2_flush_hdp(struct amdgpu_device *adev,
+ 	if (!ring || !ring->funcs->emit_wreg) {
+ 		WREG32_NO_KIQ((adev->rmmio_remap.reg_offset + KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL) >> 2,
+ 			0);
+-		if (amdgpu_sriov_vf(adev)) {
+-			/* this is fine because SR_IOV doesn't remap the register */
+-			RREG32_NO_KIQ((adev->rmmio_remap.reg_offset + KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL) >> 2);
+-		} else {
+-			/* We just need to read back a register to post the write.
+-			 * Reading back the remapped register causes problems on
+-			 * some platforms so just read back the memory size register.
+-			 */
+-			if (adev->nbio.funcs->get_memsize)
+-				adev->nbio.funcs->get_memsize(adev);
+-		}
++		RREG32_NO_KIQ((adev->rmmio_remap.reg_offset + KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL) >> 2);
+ 	} else {
+ 		amdgpu_ring_emit_wreg(ring,
+ 			(adev->rmmio_remap.reg_offset + KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL) >> 2,
+diff --git a/drivers/gpu/drm/amd/amdgpu/mxgpu_ai.c b/drivers/gpu/drm/amd/amdgpu/mxgpu_ai.c
+index d39c6baae007..12906ba74462 100644
+--- a/drivers/gpu/drm/amd/amdgpu/mxgpu_ai.c
++++ b/drivers/gpu/drm/amd/amdgpu/mxgpu_ai.c
+@@ -276,8 +276,6 @@ static void xgpu_ai_mailbox_flr_work(struct work_struct *work)
+ 		timeout -= 10;
+ 	} while (timeout > 1);
+ 
+-	dev_warn(adev->dev, "waiting IDH_FLR_NOTIFICATION_CMPL timeout\n");
+-
+ flr_done:
+ 	atomic_set(&adev->reset_domain->in_gpu_reset, 0);
+ 	up_write(&adev->reset_domain->sem);
+diff --git a/drivers/gpu/drm/amd/amdgpu/mxgpu_nv.c b/drivers/gpu/drm/amd/amdgpu/mxgpu_nv.c
+index a311a2425ec0..e07757eea7ad 100644
+--- a/drivers/gpu/drm/amd/amdgpu/mxgpu_nv.c
++++ b/drivers/gpu/drm/amd/amdgpu/mxgpu_nv.c
+@@ -300,8 +300,6 @@ static void xgpu_nv_mailbox_flr_work(struct work_struct *work)
+ 		timeout -= 10;
+ 	} while (timeout > 1);
+ 
+-	dev_warn(adev->dev, "waiting IDH_FLR_NOTIFICATION_CMPL timeout\n");
+-
+ flr_done:
+ 	atomic_set(&adev->reset_domain->in_gpu_reset, 0);
+ 	up_write(&adev->reset_domain->sem);
+diff --git a/drivers/gpu/drm/amd/amdkfd/kfd_process.c b/drivers/gpu/drm/amd/amdkfd/kfd_process.c
+index d2a2d2c53ee3..8c6bd36296c4 100644
+--- a/drivers/gpu/drm/amd/amdkfd/kfd_process.c
++++ b/drivers/gpu/drm/amd/amdkfd/kfd_process.c
+@@ -813,14 +813,6 @@ struct kfd_process *kfd_create_process(struct file *filep)
+ 	if (thread->group_leader->mm != thread->mm)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	/* If the process just called exec(3), it is possible that the
+-	 * cleanup of the kfd_process (following the release of the mm
+-	 * of the old process image) is still in the cleanup work queue.
+-	 * Make sure to drain any job before trying to recreate any
+-	 * resource for this process.
+-	 */
+-	flush_workqueue(kfd_process_wq);
+-
+ 	/*
+ 	 * take kfd processes mutex before starting of process creation
+ 	 * so there won't be a case where two threads of the same process
+@@ -833,6 +825,14 @@ struct kfd_process *kfd_create_process(struct file *filep)
+ 	if (process) {
+ 		pr_debug("Process already found\n");
+ 	} else {
++		/* If the process just called exec(3), it is possible that the
++		 * cleanup of the kfd_process (following the release of the mm
++		 * of the old process image) is still in the cleanup work queue.
++		 * Make sure to drain any job before trying to recreate any
++		 * resource for this process.
++		 */
++		flush_workqueue(kfd_process_wq);
++
+ 		process = create_process(thread);
+ 		if (IS_ERR(process))
+ 			goto out;
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+index 213054071904..cb961b531f43 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
+@@ -2897,6 +2897,11 @@ static int dm_resume(void *handle)
+ 
+ 		return 0;
+ 	}
++
++	/* leave display off for S4 sequence */
++	if (adev->in_s4)
++		return 0;
++
+ 	/* Recreate dc_state - DC invalidates it when setting power state to S3. */
+ 	dc_release_state(dm_state->context);
+ 	dm_state->context = dc_create_state(dm->dc);
+@@ -7281,7 +7286,7 @@ static int amdgpu_dm_i2c_xfer(struct i2c_adapter *i2c_adap,
+ 	int i;
+ 	int result = -EIO;
+ 
+-	if (!ddc_service->ddc_pin)
++	if (!ddc_service->ddc_pin || !ddc_service->ddc_pin->hw_info.hw_supported)
+ 		return result;
+ 
+ 	cmd.payloads = kcalloc(num, sizeof(struct i2c_payload), GFP_KERNEL);
+@@ -10694,7 +10699,7 @@ int amdgpu_dm_process_dmub_aux_transfer_sync(
+ 		 * Transient states before tunneling is enabled could
+ 		 * lead to this error. We can ignore this for now.
+ 		 */
+-		if (p_notify->result == AUX_RET_ERROR_PROTOCOL_ERROR) {
++		if (p_notify->result != AUX_RET_ERROR_PROTOCOL_ERROR) {
+ 			DRM_WARN("DPIA AUX failed on 0x%x(%d), error %d\n",
+ 					payload->address, payload->length,
+ 					p_notify->result);
+@@ -10703,15 +10708,22 @@ int amdgpu_dm_process_dmub_aux_transfer_sync(
+ 		goto out;
+ 	}
+ 
+-	payload->reply[0] = adev->dm.dmub_notify->aux_reply.command & 0xF;
+-	if (adev->dm.dmub_notify->aux_reply.command & 0xF0)
+-		/* The reply is stored in the top nibble of the command. */
+-		payload->reply[0] = (adev->dm.dmub_notify->aux_reply.command >> 4) & 0xF;
+ 
+-	/*write req may receive a byte indicating partially written number as well*/
+-	if (p_notify->aux_reply.length)
++	payload->reply[0] = adev->dm.dmub_notify->aux_reply.command;
++	if (!payload->write && p_notify->aux_reply.length &&
++			(payload->reply[0] == AUX_TRANSACTION_REPLY_AUX_ACK)) {
++
++		if (payload->length != p_notify->aux_reply.length) {
++			DRM_WARN("invalid read length %d from DPIA AUX 0x%x(%d)!\n",
++				p_notify->aux_reply.length,
++					payload->address, payload->length);
++			*operation_result = AUX_RET_ERROR_INVALID_REPLY;
++			goto out;
++		}
++
+ 		memcpy(payload->data, p_notify->aux_reply.data,
+ 				p_notify->aux_reply.length);
++	}
+ 
+ 	/* success */
+ 	ret = p_notify->aux_reply.length;
+diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_mst_types.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_mst_types.c
+index 495491decec1..5eb994ed5471 100644
+--- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_mst_types.c
++++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_mst_types.c
+@@ -55,9 +55,6 @@ bool is_timing_changed(struct dc_stream_state *cur_stream,
+ 		       struct dc_stream_state *new_stream);
+ 
+ 
+-/*
+- * This function handles both native AUX and I2C-Over-AUX transactions.
+- */
+ static ssize_t dm_dp_aux_transfer(struct drm_dp_aux *aux,
+ 				  struct drm_dp_aux_msg *msg)
+ {
+@@ -66,7 +63,6 @@ static ssize_t dm_dp_aux_transfer(struct drm_dp_aux *aux,
+ 	enum aux_return_code_type operation_result;
+ 	struct amdgpu_device *adev;
+ 	struct ddc_service *ddc;
+-	uint8_t copy[16];
+ 
+ 	if (WARN_ON(msg->size > 16))
+ 		return -E2BIG;
+@@ -82,11 +78,6 @@ static ssize_t dm_dp_aux_transfer(struct drm_dp_aux *aux,
+ 			(msg->request & DP_AUX_I2C_WRITE_STATUS_UPDATE) != 0;
+ 	payload.defer_delay = 0;
+ 
+-	if (payload.write) {
+-		memcpy(copy, msg->buffer, msg->size);
+-		payload.data = copy;
+-	}
+-
+ 	result = dc_link_aux_transfer_raw(TO_DM_AUX(aux)->ddc_service, &payload,
+ 				      &operation_result);
+ 
+@@ -100,25 +91,15 @@ static ssize_t dm_dp_aux_transfer(struct drm_dp_aux *aux,
+ 	if (adev->dm.aux_hpd_discon_quirk) {
+ 		if (msg->address == DP_SIDEBAND_MSG_DOWN_REQ_BASE &&
+ 			operation_result == AUX_RET_ERROR_HPD_DISCON) {
+-			result = msg->size;
++			result = 0;
+ 			operation_result = AUX_RET_SUCCESS;
+ 		}
+ 	}
+ 
+-	/*
+-	 * result equals to 0 includes the cases of AUX_DEFER/I2C_DEFER
+-	 */
+-	if (payload.write && result >= 0) {
+-		if (result) {
+-			/*one byte indicating partially written bytes*/
+-			drm_dbg_dp(adev_to_drm(adev), "amdgpu: AUX partially written\n");
+-			result = payload.data[0];
+-		} else if (!payload.reply[0])
+-			/*I2C_ACK|AUX_ACK*/
+-			result = msg->size;
+-	}
++	if (payload.write && result >= 0)
++		result = msg->size;
+ 
+-	if (result < 0) {
++	if (result < 0)
+ 		switch (operation_result) {
+ 		case AUX_RET_SUCCESS:
+ 			break;
+@@ -137,13 +118,6 @@ static ssize_t dm_dp_aux_transfer(struct drm_dp_aux *aux,
+ 			break;
+ 		}
+ 
+-		drm_dbg_dp(adev_to_drm(adev), "amdgpu: DP AUX transfer fail:%d\n", operation_result);
+-	}
+-
+-	if (payload.reply[0])
+-		drm_dbg_dp(adev_to_drm(adev), "amdgpu: AUX reply command not ACK: 0x%02x.",
+-			payload.reply[0]);
+-
+ 	return result;
+ }
+ 
+diff --git a/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn315/dcn315_clk_mgr.c b/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn315/dcn315_clk_mgr.c
+index 9549f9c15229..09eb1bc9aa03 100644
+--- a/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn315/dcn315_clk_mgr.c
++++ b/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn315/dcn315_clk_mgr.c
+@@ -116,7 +116,7 @@ static void dcn315_update_clocks(struct clk_mgr *clk_mgr_base,
+ 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
+ 	struct dc_clocks *new_clocks = &context->bw_ctx.bw.dcn.clk;
+ 	struct dc *dc = clk_mgr_base->ctx->dc;
+-	int display_count = 0;
++	int display_count;
+ 	bool update_dppclk = false;
+ 	bool update_dispclk = false;
+ 	bool dpp_clock_lowered = false;
+@@ -192,19 +192,15 @@ static void dcn315_update_clocks(struct clk_mgr *clk_mgr_base,
+ 		update_dppclk = true;
+ 	}
+ 
+-	if (should_set_clock(safe_to_lower, new_clocks->dispclk_khz, clk_mgr_base->clks.dispclk_khz) &&
+-	    (new_clocks->dispclk_khz > 0 || (safe_to_lower && display_count == 0))) {
+-		int requested_dispclk_khz = new_clocks->dispclk_khz;
++	if (should_set_clock(safe_to_lower, new_clocks->dispclk_khz, clk_mgr_base->clks.dispclk_khz)) {
++		/* No need to apply the w/a if we haven't taken over from bios yet */
++		if (clk_mgr_base->clks.dispclk_khz)
++			dcn315_disable_otg_wa(clk_mgr_base, context, true);
+ 
+-		dcn315_disable_otg_wa(clk_mgr_base, context, true);
+-
+-		/* Clamp the requested clock to PMFW based on their limit. */
+-		if (dc->debug.min_disp_clk_khz > 0 && requested_dispclk_khz < dc->debug.min_disp_clk_khz)
+-			requested_dispclk_khz = dc->debug.min_disp_clk_khz;
+-
+-		dcn315_smu_set_dispclk(clk_mgr, requested_dispclk_khz);
+ 		clk_mgr_base->clks.dispclk_khz = new_clocks->dispclk_khz;
+-		dcn315_disable_otg_wa(clk_mgr_base, context, false);
++		dcn315_smu_set_dispclk(clk_mgr, clk_mgr_base->clks.dispclk_khz);
++		if (clk_mgr_base->clks.dispclk_khz)
++			dcn315_disable_otg_wa(clk_mgr_base, context, false);
+ 
+ 		update_dispclk = true;
+ 	}
+diff --git a/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn316/dcn316_clk_mgr.c b/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn316/dcn316_clk_mgr.c
+index afce15aa2ff1..29d2003fb712 100644
+--- a/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn316/dcn316_clk_mgr.c
++++ b/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn316/dcn316_clk_mgr.c
+@@ -153,7 +153,7 @@ static void dcn316_update_clocks(struct clk_mgr *clk_mgr_base,
+ 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
+ 	struct dc_clocks *new_clocks = &context->bw_ctx.bw.dcn.clk;
+ 	struct dc *dc = clk_mgr_base->ctx->dc;
+-	int display_count = 0;
++	int display_count;
+ 	bool update_dppclk = false;
+ 	bool update_dispclk = false;
+ 	bool dpp_clock_lowered = false;
+@@ -226,18 +226,11 @@ static void dcn316_update_clocks(struct clk_mgr *clk_mgr_base,
+ 		update_dppclk = true;
+ 	}
+ 
+-	if (should_set_clock(safe_to_lower, new_clocks->dispclk_khz, clk_mgr_base->clks.dispclk_khz) &&
+-	    (new_clocks->dispclk_khz > 0 || (safe_to_lower && display_count == 0))) {
+-		int requested_dispclk_khz = new_clocks->dispclk_khz;
+-
++	if (should_set_clock(safe_to_lower, new_clocks->dispclk_khz, clk_mgr_base->clks.dispclk_khz)) {
+ 		dcn316_disable_otg_wa(clk_mgr_base, context, safe_to_lower, true);
+ 
+-		/* Clamp the requested clock to PMFW based on their limit. */
+-		if (dc->debug.min_disp_clk_khz > 0 && requested_dispclk_khz < dc->debug.min_disp_clk_khz)
+-			requested_dispclk_khz = dc->debug.min_disp_clk_khz;
+-
+-		dcn316_smu_set_dispclk(clk_mgr, requested_dispclk_khz);
+ 		clk_mgr_base->clks.dispclk_khz = new_clocks->dispclk_khz;
++		dcn316_smu_set_dispclk(clk_mgr, clk_mgr_base->clks.dispclk_khz);
+ 		dcn316_disable_otg_wa(clk_mgr_base, context, safe_to_lower, false);
+ 
+ 		update_dispclk = true;
+diff --git a/drivers/gpu/drm/amd/display/dc/core/dc.c b/drivers/gpu/drm/amd/display/dc/core/dc.c
+index 10672bb90a02..2721842af806 100644
+--- a/drivers/gpu/drm/amd/display/dc/core/dc.c
++++ b/drivers/gpu/drm/amd/display/dc/core/dc.c
+@@ -267,7 +267,6 @@ static bool create_links(
+ 		link->link_id.type = OBJECT_TYPE_CONNECTOR;
+ 		link->link_id.id = CONNECTOR_ID_VIRTUAL;
+ 		link->link_id.enum_id = ENUM_ID_1;
+-		link->psr_settings.psr_version = DC_PSR_VERSION_UNSUPPORTED;
+ 		link->link_enc = kzalloc(sizeof(*link->link_enc), GFP_KERNEL);
+ 
+ 		if (!link->link_enc) {
+diff --git a/drivers/gpu/drm/amd/display/dc/dcn30/dcn30_dpp.c b/drivers/gpu/drm/amd/display/dc/dcn30/dcn30_dpp.c
+index 4ce45f1bdac0..50dc83404644 100644
+--- a/drivers/gpu/drm/amd/display/dc/dcn30/dcn30_dpp.c
++++ b/drivers/gpu/drm/amd/display/dc/dcn30/dcn30_dpp.c
+@@ -392,6 +392,11 @@ bool dpp3_get_optimal_number_of_taps(
+ 	int min_taps_y, min_taps_c;
+ 	enum lb_memory_config lb_config;
+ 
++	if (scl_data->viewport.width > scl_data->h_active &&
++		dpp->ctx->dc->debug.max_downscale_src_width != 0 &&
++		scl_data->viewport.width > dpp->ctx->dc->debug.max_downscale_src_width)
++		return false;
++
+ 	/*
+ 	 * Set default taps if none are provided
+ 	 * From programming guide: taps = min{ ceil(2*H_RATIO,1), 8} for downscaling
+@@ -429,12 +434,6 @@ bool dpp3_get_optimal_number_of_taps(
+ 	else
+ 		scl_data->taps.h_taps_c = in_taps->h_taps_c;
+ 
+-	// Avoid null data in the scl data with this early return, proceed non-adaptive calcualtion first
+-	if (scl_data->viewport.width > scl_data->h_active &&
+-		dpp->ctx->dc->debug.max_downscale_src_width != 0 &&
+-		scl_data->viewport.width > dpp->ctx->dc->debug.max_downscale_src_width)
+-		return false;
+-
+ 	/*Ensure we can support the requested number of vtaps*/
+ 	min_taps_y = dc_fixpt_ceil(scl_data->ratios.vert);
+ 	min_taps_c = dc_fixpt_ceil(scl_data->ratios.vert_c);
+diff --git a/drivers/gpu/drm/amd/display/dc/dcn315/dcn315_resource.c b/drivers/gpu/drm/amd/display/dc/dcn315/dcn315_resource.c
+index 9d643c79afea..958170fbfece 100644
+--- a/drivers/gpu/drm/amd/display/dc/dcn315/dcn315_resource.c
++++ b/drivers/gpu/drm/amd/display/dc/dcn315/dcn315_resource.c
+@@ -1717,7 +1717,7 @@ static int dcn315_populate_dml_pipes_from_context(
+ 		pipes[pipe_cnt].dout.dsc_input_bpc = 0;
+ 		DC_FP_START();
+ 		dcn31_zero_pipe_dcc_fraction(pipes, pipe_cnt);
+-		if (pixel_rate_crb) {
++		if (pixel_rate_crb && !pipe->top_pipe && !pipe->prev_odm_pipe) {
+ 			int bpp = source_format_to_bpp(pipes[pipe_cnt].pipe.src.source_format);
+ 			/* Ceil to crb segment size */
+ 			int approx_det_segs_required_for_pstate = dcn_get_approx_det_segs_required_for_pstate(
+@@ -1768,26 +1768,28 @@ static int dcn315_populate_dml_pipes_from_context(
+ 				continue;
+ 			}
+ 
+-			bool split_required = pipe->stream->timing.pix_clk_100hz >= dcn_get_max_non_odm_pix_rate_100hz(&dc->dml.soc)
+-					|| (pipe->plane_state && pipe->plane_state->src_rect.width > 5120);
+-
+-			if (remaining_det_segs > MIN_RESERVED_DET_SEGS && crb_pipes != 0)
+-				pipes[pipe_cnt].pipe.src.det_size_override += (remaining_det_segs - MIN_RESERVED_DET_SEGS) / crb_pipes +
+-						(crb_idx < (remaining_det_segs - MIN_RESERVED_DET_SEGS) % crb_pipes ? 1 : 0);
+-			if (pipes[pipe_cnt].pipe.src.det_size_override > 2 * DCN3_15_MAX_DET_SEGS) {
+-				/* Clamp to 2 pipe split max det segments */
+-				remaining_det_segs += pipes[pipe_cnt].pipe.src.det_size_override - 2 * (DCN3_15_MAX_DET_SEGS);
+-				pipes[pipe_cnt].pipe.src.det_size_override = 2 * DCN3_15_MAX_DET_SEGS;
+-			}
+-			if (pipes[pipe_cnt].pipe.src.det_size_override > DCN3_15_MAX_DET_SEGS || split_required) {
+-				/* If we are splitting we must have an even number of segments */
+-				remaining_det_segs += pipes[pipe_cnt].pipe.src.det_size_override % 2;
+-				pipes[pipe_cnt].pipe.src.det_size_override -= pipes[pipe_cnt].pipe.src.det_size_override % 2;
++			if (!pipe->top_pipe && !pipe->prev_odm_pipe) {
++				bool split_required = pipe->stream->timing.pix_clk_100hz >= dcn_get_max_non_odm_pix_rate_100hz(&dc->dml.soc)
++						|| (pipe->plane_state && pipe->plane_state->src_rect.width > 5120);
++
++				if (remaining_det_segs > MIN_RESERVED_DET_SEGS && crb_pipes != 0)
++					pipes[pipe_cnt].pipe.src.det_size_override += (remaining_det_segs - MIN_RESERVED_DET_SEGS) / crb_pipes +
++							(crb_idx < (remaining_det_segs - MIN_RESERVED_DET_SEGS) % crb_pipes ? 1 : 0);
++				if (pipes[pipe_cnt].pipe.src.det_size_override > 2 * DCN3_15_MAX_DET_SEGS) {
++					/* Clamp to 2 pipe split max det segments */
++					remaining_det_segs += pipes[pipe_cnt].pipe.src.det_size_override - 2 * (DCN3_15_MAX_DET_SEGS);
++					pipes[pipe_cnt].pipe.src.det_size_override = 2 * DCN3_15_MAX_DET_SEGS;
++				}
++				if (pipes[pipe_cnt].pipe.src.det_size_override > DCN3_15_MAX_DET_SEGS || split_required) {
++					/* If we are splitting we must have an even number of segments */
++					remaining_det_segs += pipes[pipe_cnt].pipe.src.det_size_override % 2;
++					pipes[pipe_cnt].pipe.src.det_size_override -= pipes[pipe_cnt].pipe.src.det_size_override % 2;
++				}
++				/* Convert segments into size for DML use */
++				pipes[pipe_cnt].pipe.src.det_size_override *= DCN3_15_CRB_SEGMENT_SIZE_KB;
++
++				crb_idx++;
+ 			}
+-			/* Convert segments into size for DML use */
+-			pipes[pipe_cnt].pipe.src.det_size_override *= DCN3_15_CRB_SEGMENT_SIZE_KB;
+-
+-			crb_idx++;
+ 			pipe_cnt++;
+ 		}
+ 	}
+diff --git a/drivers/gpu/drm/ast/ast_mode.c b/drivers/gpu/drm/ast/ast_mode.c
+index 9fe856fd8a84..1bc0220e6783 100644
+--- a/drivers/gpu/drm/ast/ast_mode.c
++++ b/drivers/gpu/drm/ast/ast_mode.c
+@@ -103,7 +103,7 @@ static bool ast_get_vbios_mode_info(const struct drm_format_info *format,
+ 		return false;
+ 	}
+ 
+-	switch (mode->hdisplay) {
++	switch (mode->crtc_hdisplay) {
+ 	case 640:
+ 		vbios_mode->enh_table = &res_640x480[refresh_rate_index];
+ 		break;
+@@ -117,7 +117,7 @@ static bool ast_get_vbios_mode_info(const struct drm_format_info *format,
+ 		vbios_mode->enh_table = &res_1152x864[refresh_rate_index];
+ 		break;
+ 	case 1280:
+-		if (mode->vdisplay == 800)
++		if (mode->crtc_vdisplay == 800)
+ 			vbios_mode->enh_table = &res_1280x800[refresh_rate_index];
+ 		else
+ 			vbios_mode->enh_table = &res_1280x1024[refresh_rate_index];
+@@ -129,7 +129,7 @@ static bool ast_get_vbios_mode_info(const struct drm_format_info *format,
+ 		vbios_mode->enh_table = &res_1440x900[refresh_rate_index];
+ 		break;
+ 	case 1600:
+-		if (mode->vdisplay == 900)
++		if (mode->crtc_vdisplay == 900)
+ 			vbios_mode->enh_table = &res_1600x900[refresh_rate_index];
+ 		else
+ 			vbios_mode->enh_table = &res_1600x1200[refresh_rate_index];
+@@ -138,7 +138,7 @@ static bool ast_get_vbios_mode_info(const struct drm_format_info *format,
+ 		vbios_mode->enh_table = &res_1680x1050[refresh_rate_index];
+ 		break;
+ 	case 1920:
+-		if (mode->vdisplay == 1080)
++		if (mode->crtc_vdisplay == 1080)
+ 			vbios_mode->enh_table = &res_1920x1080[refresh_rate_index];
+ 		else
+ 			vbios_mode->enh_table = &res_1920x1200[refresh_rate_index];
+@@ -182,7 +182,6 @@ static bool ast_get_vbios_mode_info(const struct drm_format_info *format,
+ 	hborder = (vbios_mode->enh_table->flags & HBorder) ? 8 : 0;
+ 	vborder = (vbios_mode->enh_table->flags & VBorder) ? 8 : 0;
+ 
+-	adjusted_mode->crtc_hdisplay = vbios_mode->enh_table->hde;
+ 	adjusted_mode->crtc_htotal = vbios_mode->enh_table->ht;
+ 	adjusted_mode->crtc_hblank_start = vbios_mode->enh_table->hde + hborder;
+ 	adjusted_mode->crtc_hblank_end = vbios_mode->enh_table->ht - hborder;
+@@ -192,7 +191,6 @@ static bool ast_get_vbios_mode_info(const struct drm_format_info *format,
+ 					 vbios_mode->enh_table->hfp +
+ 					 vbios_mode->enh_table->hsync);
+ 
+-	adjusted_mode->crtc_vdisplay = vbios_mode->enh_table->vde;
+ 	adjusted_mode->crtc_vtotal = vbios_mode->enh_table->vt;
+ 	adjusted_mode->crtc_vblank_start = vbios_mode->enh_table->vde + vborder;
+ 	adjusted_mode->crtc_vblank_end = vbios_mode->enh_table->vt - vborder;
+diff --git a/drivers/gpu/drm/drm_atomic_helper.c b/drivers/gpu/drm/drm_atomic_helper.c
+index e737e45a3a70..66d223c2d9ab 100644
+--- a/drivers/gpu/drm/drm_atomic_helper.c
++++ b/drivers/gpu/drm/drm_atomic_helper.c
+@@ -573,30 +573,6 @@ mode_valid(struct drm_atomic_state *state)
+ 	return 0;
+ }
+ 
+-static int drm_atomic_check_valid_clones(struct drm_atomic_state *state,
+-					 struct drm_crtc *crtc)
+-{
+-	struct drm_encoder *drm_enc;
+-	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
+-									  crtc);
+-
+-	drm_for_each_encoder_mask(drm_enc, crtc->dev, crtc_state->encoder_mask) {
+-		if (!drm_enc->possible_clones) {
+-			DRM_DEBUG("enc%d possible_clones is 0\n", drm_enc->base.id);
+-			continue;
+-		}
+-
+-		if ((crtc_state->encoder_mask & drm_enc->possible_clones) !=
+-		    crtc_state->encoder_mask) {
+-			DRM_DEBUG("crtc%d failed valid clone check for mask 0x%x\n",
+-				  crtc->base.id, crtc_state->encoder_mask);
+-			return -EINVAL;
+-		}
+-	}
+-
+-	return 0;
+-}
+-
+ /**
+  * drm_atomic_helper_check_modeset - validate state object for modeset changes
+  * @dev: DRM device
+@@ -768,10 +744,6 @@ drm_atomic_helper_check_modeset(struct drm_device *dev,
+ 		ret = drm_atomic_add_affected_planes(state, crtc);
+ 		if (ret != 0)
+ 			return ret;
+-
+-		ret = drm_atomic_check_valid_clones(state, crtc);
+-		if (ret != 0)
+-			return ret;
+ 	}
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/drm_edid.c b/drivers/gpu/drm/drm_edid.c
+index fc6028aae9bd..5ed77e3361fd 100644
+--- a/drivers/gpu/drm/drm_edid.c
++++ b/drivers/gpu/drm/drm_edid.c
+@@ -6164,7 +6164,6 @@ static void drm_reset_display_info(struct drm_connector *connector)
+ 	info->has_hdmi_infoframe = false;
+ 	info->rgb_quant_range_selectable = false;
+ 	memset(&info->hdmi, 0, sizeof(info->hdmi));
+-	memset(&connector->hdr_sink_metadata, 0, sizeof(connector->hdr_sink_metadata));
+ 
+ 	info->edid_hdmi_rgb444_dc_modes = 0;
+ 	info->edid_hdmi_ycbcr444_dc_modes = 0;
+diff --git a/drivers/gpu/drm/mediatek/mtk_dpi.c b/drivers/gpu/drm/mediatek/mtk_dpi.c
+index 5ad9c384046c..1fa958e8c40a 100644
+--- a/drivers/gpu/drm/mediatek/mtk_dpi.c
++++ b/drivers/gpu/drm/mediatek/mtk_dpi.c
+@@ -406,13 +406,12 @@ static void mtk_dpi_config_swap_input(struct mtk_dpi *dpi, bool enable)
+ 
+ static void mtk_dpi_config_2n_h_fre(struct mtk_dpi *dpi)
+ {
+-	if (dpi->conf->reg_h_fre_con)
+-		mtk_dpi_mask(dpi, dpi->conf->reg_h_fre_con, H_FRE_2N, H_FRE_2N);
++	mtk_dpi_mask(dpi, dpi->conf->reg_h_fre_con, H_FRE_2N, H_FRE_2N);
+ }
+ 
+ static void mtk_dpi_config_disable_edge(struct mtk_dpi *dpi)
+ {
+-	if (dpi->conf->edge_sel_en && dpi->conf->reg_h_fre_con)
++	if (dpi->conf->edge_sel_en)
+ 		mtk_dpi_mask(dpi, dpi->conf->reg_h_fre_con, 0, EDGE_SEL_EN);
+ }
+ 
+diff --git a/drivers/gpu/drm/panel/panel-edp.c b/drivers/gpu/drm/panel/panel-edp.c
+index 1ef1b4c966d2..2c14779a39e8 100644
+--- a/drivers/gpu/drm/panel/panel-edp.c
++++ b/drivers/gpu/drm/panel/panel-edp.c
+@@ -1944,7 +1944,6 @@ static const struct edp_panel_entry edp_panels[] = {
+ 	EDP_PANEL_ENTRY('S', 'H', 'P', 0x1523, &sharp_lq140m1jw46.delay, "LQ140M1JW46"),
+ 	EDP_PANEL_ENTRY('S', 'H', 'P', 0x154c, &delay_200_500_p2e100, "LQ116M1JW10"),
+ 
+-	EDP_PANEL_ENTRY('S', 'T', 'A', 0x0004, &delay_200_500_e200, "116KHD024006"),
+ 	EDP_PANEL_ENTRY('S', 'T', 'A', 0x0100, &delay_100_500_e200, "2081116HHD028001-51D"),
+ 
+ 	{ /* sentinal */ }
+diff --git a/drivers/gpu/drm/panel/panel-simple.c b/drivers/gpu/drm/panel/panel-simple.c
+index 3f41fd5edc33..4f7e668230ba 100644
+--- a/drivers/gpu/drm/panel/panel-simple.c
++++ b/drivers/gpu/drm/panel/panel-simple.c
+@@ -921,28 +921,27 @@ static const struct panel_desc auo_g070vvn01 = {
+ 	},
+ };
+ 
+-static const struct display_timing auo_g101evn010_timing = {
+-	.pixelclock = { 64000000, 68930000, 85000000 },
+-	.hactive = { 1280, 1280, 1280 },
+-	.hfront_porch = { 8, 64, 256 },
+-	.hback_porch = { 8, 64, 256 },
+-	.hsync_len = { 40, 168, 767 },
+-	.vactive = { 800, 800, 800 },
+-	.vfront_porch = { 4, 8, 100 },
+-	.vback_porch = { 4, 8, 100 },
+-	.vsync_len = { 8, 16, 223 },
++static const struct drm_display_mode auo_g101evn010_mode = {
++	.clock = 68930,
++	.hdisplay = 1280,
++	.hsync_start = 1280 + 82,
++	.hsync_end = 1280 + 82 + 2,
++	.htotal = 1280 + 82 + 2 + 84,
++	.vdisplay = 800,
++	.vsync_start = 800 + 8,
++	.vsync_end = 800 + 8 + 2,
++	.vtotal = 800 + 8 + 2 + 6,
+ };
+ 
+ static const struct panel_desc auo_g101evn010 = {
+-	.timings = &auo_g101evn010_timing,
+-	.num_timings = 1,
++	.modes = &auo_g101evn010_mode,
++	.num_modes = 1,
+ 	.bpc = 6,
+ 	.size = {
+ 		.width = 216,
+ 		.height = 135,
+ 	},
+ 	.bus_format = MEDIA_BUS_FMT_RGB666_1X7X3_SPWG,
+-	.bus_flags = DRM_BUS_FLAG_DE_HIGH,
+ 	.connector_type = DRM_MODE_CONNECTOR_LVDS,
+ };
+ 
+diff --git a/drivers/gpu/drm/rockchip/rockchip_drm_vop2.c b/drivers/gpu/drm/rockchip/rockchip_drm_vop2.c
+index e14557d80efc..247931e862a9 100644
+--- a/drivers/gpu/drm/rockchip/rockchip_drm_vop2.c
++++ b/drivers/gpu/drm/rockchip/rockchip_drm_vop2.c
+@@ -1289,8 +1289,10 @@ static void vop2_plane_atomic_update(struct drm_plane *plane,
+ 
+ 	rb_swap = vop2_win_rb_swap(fb->format->format);
+ 	vop2_win_write(win, VOP2_WIN_RB_SWAP, rb_swap);
+-	uv_swap = vop2_win_uv_swap(fb->format->format);
+-	vop2_win_write(win, VOP2_WIN_UV_SWAP, uv_swap);
++	if (!vop2_cluster_window(win)) {
++		uv_swap = vop2_win_uv_swap(fb->format->format);
++		vop2_win_write(win, VOP2_WIN_UV_SWAP, uv_swap);
++	}
+ 
+ 	if (fb->format->is_yuv) {
+ 		vop2_win_write(win, VOP2_WIN_UV_VIR, DIV_ROUND_UP(fb->pitches[1], 4));
+diff --git a/drivers/gpu/drm/v3d/v3d_sched.c b/drivers/gpu/drm/v3d/v3d_sched.c
+index 41493cf3d03b..5b729013fd26 100644
+--- a/drivers/gpu/drm/v3d/v3d_sched.c
++++ b/drivers/gpu/drm/v3d/v3d_sched.c
+@@ -289,16 +289,11 @@ v3d_gpu_reset_for_timeout(struct v3d_dev *v3d, struct drm_sched_job *sched_job)
+ 	return DRM_GPU_SCHED_STAT_NOMINAL;
+ }
+ 
+-static void
+-v3d_sched_skip_reset(struct drm_sched_job *sched_job)
+-{
+-	struct drm_gpu_scheduler *sched = sched_job->sched;
+-
+-	spin_lock(&sched->job_list_lock);
+-	list_add(&sched_job->list, &sched->pending_list);
+-	spin_unlock(&sched->job_list_lock);
+-}
+-
++/* If the current address or return address have changed, then the GPU
++ * has probably made progress and we should delay the reset.  This
++ * could fail if the GPU got in an infinite loop in the CL, but that
++ * is pretty unlikely outside of an i-g-t testcase.
++ */
+ static enum drm_gpu_sched_stat
+ v3d_cl_job_timedout(struct drm_sched_job *sched_job, enum v3d_queue q,
+ 		    u32 *timedout_ctca, u32 *timedout_ctra)
+@@ -308,16 +303,9 @@ v3d_cl_job_timedout(struct drm_sched_job *sched_job, enum v3d_queue q,
+ 	u32 ctca = V3D_CORE_READ(0, V3D_CLE_CTNCA(q));
+ 	u32 ctra = V3D_CORE_READ(0, V3D_CLE_CTNRA(q));
+ 
+-	/* If the current address or return address have changed, then the GPU
+-	 * has probably made progress and we should delay the reset. This
+-	 * could fail if the GPU got in an infinite loop in the CL, but that
+-	 * is pretty unlikely outside of an i-g-t testcase.
+-	 */
+ 	if (*timedout_ctca != ctca || *timedout_ctra != ctra) {
+ 		*timedout_ctca = ctca;
+ 		*timedout_ctra = ctra;
+-
+-		v3d_sched_skip_reset(sched_job);
+ 		return DRM_GPU_SCHED_STAT_NOMINAL;
+ 	}
+ 
+@@ -357,13 +345,11 @@ v3d_csd_job_timedout(struct drm_sched_job *sched_job)
+ 	struct v3d_dev *v3d = job->base.v3d;
+ 	u32 batches = V3D_CORE_READ(0, V3D_CSD_CURRENT_CFG4);
+ 
+-	/* If we've made progress, skip reset, add the job to the pending
+-	 * list, and let the timer get rearmed.
++	/* If we've made progress, skip reset and let the timer get
++	 * rearmed.
+ 	 */
+ 	if (job->timedout_batches != batches) {
+ 		job->timedout_batches = batches;
+-
+-		v3d_sched_skip_reset(sched_job);
+ 		return DRM_GPU_SCHED_STAT_NOMINAL;
+ 	}
+ 
+diff --git a/include/drm/drm_atomic.h b/include/drm/drm_atomic.h
+index 36225aedf613..10b1990bc1f6 100644
+--- a/include/drm/drm_atomic.h
++++ b/include/drm/drm_atomic.h
+@@ -372,27 +372,8 @@ struct drm_atomic_state {
+ 	 *
+ 	 * Allow full modeset. This is used by the ATOMIC IOCTL handler to
+ 	 * implement the DRM_MODE_ATOMIC_ALLOW_MODESET flag. Drivers should
+-	 * generally not consult this flag, but instead look at the output of
+-	 * drm_atomic_crtc_needs_modeset(). The detailed rules are:
+-	 *
+-	 * - Drivers must not consult @allow_modeset in the atomic commit path.
+-	 *   Use drm_atomic_crtc_needs_modeset() instead.
+-	 *
+-	 * - Drivers must consult @allow_modeset before adding unrelated struct
+-	 *   drm_crtc_state to this commit by calling
+-	 *   drm_atomic_get_crtc_state(). See also the warning in the
+-	 *   documentation for that function.
+-	 *
+-	 * - Drivers must never change this flag, it is under the exclusive
+-	 *   control of userspace.
+-	 *
+-	 * - Drivers may consult @allow_modeset in the atomic check path, if
+-	 *   they have the choice between an optimal hardware configuration
+-	 *   which requires a modeset, and a less optimal configuration which
+-	 *   can be committed without a modeset. An example would be suboptimal
+-	 *   scanout FIFO allocation resulting in increased idle power
+-	 *   consumption. This allows userspace to avoid flickering and delays
+-	 *   for the normal composition loop at reasonable cost.
++	 * never consult this flag, instead looking at the output of
++	 * drm_atomic_crtc_needs_modeset().
+ 	 */
+ 	bool allow_modeset : 1;
+ 	/**

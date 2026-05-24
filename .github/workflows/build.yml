@@ -1067,6 +1067,21 @@ jobs:
           grep -q '^CONFIG_REKERNEL=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL=y" >> "$DEFCONFIG"
           grep -q '^CONFIG_REKERNEL_NETWORK=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL_NETWORK=y" >> "$DEFCONFIG"
 
+      - name: 应用用户自定义补丁与配置
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          echo "应用用户自定义补丁..."
+          if [ "${{ inputs.kernel_version }}" = "6.1" ]; then
+            if [ -f "$ZZH_PATCHES/Patch/drm_fix_6.1.patch" ]; then
+              patch -p1 < "$ZZH_PATCHES/Patch/drm_fix_6.1.patch" || echo "警告: 用户补丁应用失败"
+            fi
+          fi
+
+          echo "集成用户自定义配置..."
+          if [ -f "$ZZH_PATCHES/config/gki_defconfig" ]; then
+            cat "$ZZH_PATCHES/config/gki_defconfig" >> "$DEFCONFIG"
+          fi
+
       - name: 配置内核选项
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
