@@ -1205,6 +1205,12 @@ jobs:
               fi
             fi
           fi
+          
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
 
       - name: 编译内核
         uses: nick-fields/retry@v4
