@@ -1151,6 +1151,10 @@ jobs:
           rm -rf "$TMP_REKERNEL"
           git clone --depth 1 https://github.com/Sakion-Team/Re-Kernel.git "$TMP_REKERNEL"
 
+          REKERNEL_LATEST_COMMIT_DATE=$(git -C "$TMP_REKERNEL" log -1 --date=format:'%Y-%m-%d %H:%M:%S %z' --format='%cd')
+          echo "REKERNEL_LATEST_COMMIT_DATE=$REKERNEL_LATEST_COMMIT_DATE" >> $GITHUB_ENV
+          echo "Re-Kernel 仓库最新提交日期: $REKERNEL_LATEST_COMMIT_DATE"
+
           # 准备驱动源码
           mkdir -p common/drivers/rekernel
           cp "$TMP_REKERNEL/LKM-Source/rekernel.c" common/drivers/rekernel/
@@ -1200,6 +1204,11 @@ jobs:
           # 配置 defconfig（幂等）
           grep -q '^CONFIG_REKERNEL=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL=y" >> "$DEFCONFIG"
           grep -q '^CONFIG_REKERNEL_NETWORK=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL_NETWORK=y" >> "$DEFCONFIG"
+
+      - name: 显示 Re-Kernel 版本信息
+        if: inputs.use_rekernel
+        run: |
+          echo "Re-Kernel 版本 (提交日期): ${{ env.REKERNEL_LATEST_COMMIT_DATE }}"
 
       - name: 应用用户自定义补丁与配置
         working-directory: ${{ env.KERNEL_ROOT }}/common
