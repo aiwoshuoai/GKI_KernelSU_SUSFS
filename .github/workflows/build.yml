@@ -1187,12 +1187,26 @@ jobs:
           echo "REKERNEL_LATEST_COMMIT_DATE=$REKERNEL_LATEST_COMMIT_DATE" >> $GITHUB_ENV
           echo "Re-Kernel 仓库最新提交日期: $REKERNEL_LATEST_COMMIT_DATE"
 
-          # 准备驱动源码
+          # 准备驱动源码目录
           mkdir -p common/drivers/rekernel
-          cp "$TMP_REKERNEL/LKM-Source/rekernel.c" common/drivers/rekernel/
-          cp "$TMP_REKERNEL/LKM-Source/rekernel.h" common/drivers/rekernel/
 
-          # 生成构建配置
+          # 1. 智能定位代码目录（兼容作者未来可能的目录改名）
+          if [ -d "$TMP_REKERNEL/LKM-Source" ]; then
+            SRC_DIR="$TMP_REKERNEL/LKM-Source"
+          elif [ -d "$TMP_REKERNEL/kernel" ]; then
+            SRC_DIR="$TMP_REKERNEL/kernel"
+          else
+            SRC_DIR="$TMP_REKERNEL"
+          fi
+
+          echo "从 $SRC_DIR 复制源码文件..."
+          cp "$SRC_DIR"/*.c common/drivers/rekernel/ || true
+          cp "$SRC_DIR"/*.h common/drivers/rekernel/ || true
+
+          # 2. 动态生成支持多文件的 Makefile
+          C_FILES=$(ls common/drivers/rekernel/*.c 2>/dev/null | xargs -n 1 basename)
+          O_FILES=$(echo "$C_FILES" | sed 's/\.c/.o/g')
+
           cat > common/drivers/rekernel/Kconfig << 'EOF'
           menu "Re:Kernel"
           config REKERNEL
@@ -1208,12 +1222,13 @@ jobs:
           endmenu
           EOF
 
-          cat > common/drivers/rekernel/Makefile << 'EOF'
-          obj-$(CONFIG_REKERNEL) += rekernel.o
-          ccflags-$(CONFIG_REKERNEL_NETWORK) += -DNETWORK_FILTER
+          cat > common/drivers/rekernel/Makefile << EOF
+          obj-\$(CONFIG_REKERNEL) += rekernel_core.o
+          rekernel_core-y := $O_FILES
+          ccflags-\$(CONFIG_REKERNEL_NETWORK) += -DNETWORK_FILTER
           EOF
 
-          # 挂载到驱动树
+          # 3. 挂载到驱动树
           if ! grep -qF 'source "drivers/rekernel/Kconfig"' common/drivers/Kconfig; then
             sed -i '/^endmenu$/i source "drivers/rekernel/Kconfig"' common/drivers/Kconfig
           fi
@@ -1221,19 +1236,26 @@ jobs:
             echo 'obj-$(CONFIG_REKERNEL) += rekernel/' >> common/drivers/Makefile
           fi
 
-          # 启用内核版本宏
-          REKERNEL_H="common/drivers/rekernel/rekernel.h"
+          # 4. 批量处理头文件和版本宏 (保留了您的 inputs.kernel_version 变量)
           VERSION_MACRO="KERNEL_$(echo "${{ inputs.kernel_version }}" | tr '.' '_')"
-          if grep -q "^// #define ${VERSION_MACRO}$" "$REKERNEL_H"; then
-            sed -i "s|^// #define ${VERSION_MACRO}$|#define ${VERSION_MACRO}|" "$REKERNEL_H"
-          fi
+          for header in common/drivers/rekernel/*.h; do
+            [ -f "$header" ] || continue
+            if grep -q "^// #define ${VERSION_MACRO}$" "$header"; then
+              sed -i "s|^// #define ${VERSION_MACRO}$|#define ${VERSION_MACRO}|" "$header"
+            fi
+          done
 
-          # 修正头文件包含路径（适配 in-tree 编译）
-          sed -i 's|#include <../android/binder_internal.h>|#include "../../drivers/android/binder_internal.h"|g' common/drivers/rekernel/rekernel.c
-          # 补齐 binder_internal 依赖（避免 5.10 下 DEFINE_SHOW_ATTRIBUTE 报错）
-          grep -qF '#include <linux/seq_file.h>' common/drivers/rekernel/rekernel.c || sed -i '/#include <trace\/hooks\/signal.h>/a #include <linux/seq_file.h>' common/drivers/rekernel/rekernel.c
+          # 5. 批量修正所有 C 文件的引用路径和缺失依赖
+          for cfile in common/drivers/rekernel/*.c; do
+            [ -f "$cfile" ] || continue
+            sed -i 's|#include <../android/binder_internal.h>|#include "../../drivers/android/binder_internal.h"|g' "$cfile"
+            # 补齐 binder_internal 依赖
+            if grep -qF '#include <trace/hooks/signal.h>' "$cfile" && ! grep -qF '#include <linux/seq_file.h>' "$cfile"; then
+              sed -i '/#include <trace\/hooks\/signal.h>/a #include <linux/seq_file.h>' "$cfile"
+            fi
+          done
 
-          # 配置 defconfig（幂等）
+          # 6. 配置 defconfig
           grep -q '^CONFIG_REKERNEL=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL=y" >> "$DEFCONFIG"
           grep -q '^CONFIG_REKERNEL_NETWORK=y$' "$DEFCONFIG" || echo "CONFIG_REKERNEL_NETWORK=y" >> "$DEFCONFIG"
 
